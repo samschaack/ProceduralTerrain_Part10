@@ -14,8 +14,8 @@ export const flat_terrain = (function() {
   const _NUM_WORKERS = 7;
 
   // Default location: Swiss Alps (Matterhorn area)
-  const DEFAULT_CENTER_LAT = 45.9763;
-  const DEFAULT_CENTER_LON = 7.6586;
+  const DEFAULT_CENTER_LAT = 39.0689;
+  const DEFAULT_CENTER_LON = -108.5643;
 
   // Meters per world unit (1 unit = 1 meter)
   const METERS_PER_UNIT = 1;
@@ -193,8 +193,12 @@ export const flat_terrain = (function() {
 
     update(cameraPosition) {
       // Update mesh position relative to camera (floating origin)
-      this._mesh.position.copy(cameraPosition).negate();
-      this._mesh.position.add(this._params.worldPosition);
+      // Vertices are in absolute world coordinates, so just offset by -cameraPosition
+      this._mesh.position.set(
+        -cameraPosition.x,
+        -cameraPosition.y,
+        -cameraPosition.z
+      );
     }
 
     destroy() {
@@ -233,6 +237,10 @@ export const flat_terrain = (function() {
       this._mapboxToken = '';
       this._mapboxZoom = 12;
       this._terrainProvider = null;
+
+      // Chunk loading throttling
+      this._loadingChunks = 0;
+      this._maxConcurrentLoads = 4; // Limit concurrent chunk loads
 
       this._init();
     }
@@ -363,49 +371,49 @@ export const flat_terrain = (function() {
     }
 
     /**
-     * Build quadtree based on camera position
+     * Get the set of chunk keys that should be visible for a given camera position
+     * Uses a fixed grid - chunks are at fixed world positions (multiples of chunkSize)
      */
-    _buildQuadTree(cameraPos) {
-      const halfSize = this._maxChunkSize;
-      const root = new QuadTreeNode(
-        cameraPos.x - halfSize,
-        cameraPos.z - halfSize,
-        halfSize * 2,
-        0
-      );
+    _getVisibleChunkKeys(cameraPos) {
+      const keys = new Set();
+      const chunkSize = this._chunkSize;
+      const viewDist = this._viewDistance;
 
-      const nodes = [];
-      this._subdivideNode(root, cameraPos, nodes);
-      return nodes;
-    }
+      // Calculate grid range around camera
+      const minX = Math.floor((cameraPos.x - viewDist) / chunkSize) * chunkSize;
+      const maxX = Math.floor((cameraPos.x + viewDist) / chunkSize) * chunkSize;
+      const minZ = Math.floor((cameraPos.z - viewDist) / chunkSize) * chunkSize;
+      const maxZ = Math.floor((cameraPos.z + viewDist) / chunkSize) * chunkSize;
 
-    _subdivideNode(node, cameraPos, results) {
-      const center = node.center;
-      const distance = Math.sqrt(
-        (center.x - cameraPos.x) ** 2 +
-        (center.y - cameraPos.z) ** 2
-      );
+      // Add all chunks within view distance
+      for (let x = minX; x <= maxX; x += chunkSize) {
+        for (let z = minZ; z <= maxZ; z += chunkSize) {
+          // Check if chunk center is within view distance
+          const centerX = x + chunkSize / 2;
+          const centerZ = z + chunkSize / 2;
+          const dist = Math.sqrt(
+            (centerX - cameraPos.x) ** 2 +
+            (centerZ - cameraPos.z) ** 2
+          );
 
-      // Subdivide if close enough and not at minimum size
-      const shouldSubdivide = distance < node.size * 2 && node.size > this._chunkSize;
-
-      if (shouldSubdivide) {
-        const children = node.subdivide();
-        for (const child of children) {
-          this._subdivideNode(child, cameraPos, results);
+          if (dist < viewDist + chunkSize) {
+            keys.add(`${x}/${z}/${chunkSize}`);
+          }
         }
-      } else if (distance < this._viewDistance + node.size) {
-        results.push(node);
       }
+
+      return keys;
     }
 
     /**
-     * Create a terrain chunk
+     * Create a terrain chunk at a fixed grid position
      */
-    async _createChunk(node) {
+    async _createChunkAtGrid(x, z, size) {
+      const node = { x, y: z, size, key: `${x}/${z}/${size}` };
+
       // Calculate bounds in lon/lat
-      const sw = this.worldToLonLat(node.x, node.y);
-      const ne = this.worldToLonLat(node.x + node.size, node.y + node.size);
+      const sw = this.worldToLonLat(x, z);
+      const ne = this.worldToLonLat(x + size, z + size);
 
       // Prefetch required tiles
       await this._terrainProvider.prefetchTiles(sw.lon, sw.lat, ne.lon, ne.lat);
@@ -417,30 +425,23 @@ export const flat_terrain = (function() {
       const chunkParams = {
         group: this._group,
         material: this._material,
-        worldPosition: new THREE.Vector3(node.x + node.size / 2, 0, node.y + node.size / 2),
-        size: node.size,
+        worldPosition: new THREE.Vector3(x + size / 2, 0, z + size / 2),
+        size: size,
         resolution: this._resolution,
         node: node
       };
 
-      // Get or create chunk from pool
-      let chunk;
-      if (this._chunkPool[node.size] && this._chunkPool[node.size].length > 0) {
-        chunk = this._chunkPool[node.size].pop();
-        chunk.params = chunkParams;
-      } else {
-        chunk = new FlatTerrainChunk(chunkParams);
-      }
-
+      // Create chunk
+      const chunk = new FlatTerrainChunk(chunkParams);
       chunk.hide();
 
       // Send to worker for mesh building
       const workerParams = {
-        size: node.size,
+        size: size,
         resolution: this._resolution,
         heightData: heightData,
-        worldX: node.x,
-        worldY: node.y
+        worldX: x,
+        worldY: z
       };
 
       return new Promise((resolve) => {
@@ -450,7 +451,7 @@ export const flat_terrain = (function() {
             if (result.subject === 'build_chunk_result') {
               chunk.rebuildFromData(result.data);
             }
-            resolve({ chunk, node });
+            resolve({ chunk, key: node.key });
           }
         );
       });
@@ -471,8 +472,8 @@ export const flat_terrain = (function() {
       for (let y = 0; y < resolution; y++) {
         for (let x = 0; x < resolution; x++) {
           const worldX = node.x + (x / (resolution - 1)) * node.size;
-          const worldY = node.y + (y / (resolution - 1)) * node.size;
-          const { lon, lat } = this.worldToLonLat(worldX, worldY);
+          const worldZ = node.y + (y / (resolution - 1)) * node.size;
+          const { lon, lat } = this.worldToLonLat(worldX, worldZ);
 
           indices.push(y * resolution + x);
           promises.push(
@@ -499,59 +500,80 @@ export const flat_terrain = (function() {
     Update(deltaTime) {
       const cameraPos = this._params.camera.position;
 
-      // Recycle old chunks
-      if (!this._workerPool.busy) {
-        for (const chunkData of this._oldChunks) {
-          if (chunkData.chunk) {
-            chunkData.chunk.destroy();
+      // Get set of chunk keys that should be visible
+      const visibleKeys = this._getVisibleChunkKeys(cameraPos);
+
+      // Find chunks to remove (outside view distance and not loading)
+      const chunksToRemove = [];
+      for (const key in this._chunks) {
+        if (!visibleKeys.has(key)) {
+          const chunkData = this._chunks[key];
+          // Only remove if chunk is fully loaded (keep showing while loading)
+          if (chunkData.chunk && !chunkData.pending) {
+            chunksToRemove.push(key);
           }
         }
-        this._oldChunks = [];
       }
 
-      // Build quadtree
-      const nodes = this._buildQuadTree(cameraPos);
+      // Remove old chunks
+      for (const key of chunksToRemove) {
+        const chunkData = this._chunks[key];
+        if (chunkData.chunk) {
+          chunkData.chunk.destroy();
+        }
+        delete this._chunks[key];
+      }
 
-      // Determine new and old chunks
-      const newChunkKeys = new Set(nodes.map(n => n.key));
-      const existingKeys = new Set(Object.keys(this._chunks));
+      // Find chunks to create
+      const chunksToCreate = [];
+      for (const key of visibleKeys) {
+        if (!this._chunks[key]) {
+          chunksToCreate.push(key);
+        }
+      }
 
-      // Remove chunks no longer needed
-      for (const key of existingKeys) {
-        if (!newChunkKeys.has(key)) {
-          this._oldChunks.push(this._chunks[key]);
+      // Sort by distance to camera (prioritize closer chunks)
+      chunksToCreate.sort((a, b) => {
+        const [ax, az] = a.split('/').map(Number);
+        const [bx, bz] = b.split('/').map(Number);
+        const distA = Math.sqrt((ax + this._chunkSize/2 - cameraPos.x) ** 2 + (az + this._chunkSize/2 - cameraPos.z) ** 2);
+        const distB = Math.sqrt((bx + this._chunkSize/2 - cameraPos.x) ** 2 + (bz + this._chunkSize/2 - cameraPos.z) ** 2);
+        return distA - distB;
+      });
+
+      // Create new chunks (limited concurrent loads)
+      for (const key of chunksToCreate) {
+        if (this._loadingChunks >= this._maxConcurrentLoads) break;
+
+        // Parse key to get grid position
+        const [x, z, size] = key.split('/').map(Number);
+
+        // Mark as pending
+        this._chunks[key] = { pending: true, key };
+        this._loadingChunks++;
+
+        // Start async chunk creation
+        this._createChunkAtGrid(x, z, size).then(({ chunk, key }) => {
+          this._loadingChunks--;
+          if (this._chunks[key]) {
+            this._chunks[key] = { chunk, key, pending: false };
+            chunk.show();
+          } else {
+            // Chunk was removed while building (camera moved away)
+            chunk.destroy();
+          }
+        }).catch(err => {
+          this._loadingChunks--;
+          console.error('Error creating chunk:', err);
           delete this._chunks[key];
-        }
+        });
       }
 
-      // Create new chunks (non-blocking - uses promises internally)
-      for (const node of nodes) {
-        if (!this._chunks[node.key]) {
-          // Mark as pending
-          this._chunks[node.key] = { pending: true, node };
-
-          // Start async chunk creation (does not block)
-          this._createChunk(node).then(({ chunk, node }) => {
-            if (this._chunks[node.key]) {
-              this._chunks[node.key] = { chunk, node, pending: false };
-              chunk.show();
-            } else {
-              // Chunk was removed while building
-              chunk.destroy();
-            }
-          }).catch(err => {
-            console.error('Error creating chunk:', err);
-            delete this._chunks[node.key];
-          });
-        }
-      }
-
-      // Update visible chunks
+      // Update all visible chunks (both loading and loaded)
       for (const key in this._chunks) {
         const data = this._chunks[key];
         if (data.chunk && !data.pending) {
           data.chunk.update(cameraPos);
-          data.chunk.show();
         }
       }
     }
