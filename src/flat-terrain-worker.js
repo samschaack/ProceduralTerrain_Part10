@@ -1,18 +1,9 @@
 /**
- * Worker for building flat terrain mesh geometry
- * Receives height data and builds vertex positions, normals, and colors
+ * Worker for building terrain mesh geometry from Mapbox tile data
+ * Supports variable resolution and world bounds
  */
 
-const _V1 = { x: 0, y: 0, z: 0 };
-const _V2 = { x: 0, y: 0, z: 0 };
-const _V3 = { x: 0, y: 0, z: 0 };
 const _N = { x: 0, y: 0, z: 0 };
-
-function vec3Sub(out, a, b) {
-  out.x = a.x - b.x;
-  out.y = a.y - b.y;
-  out.z = a.z - b.z;
-}
 
 function vec3Cross(out, a, b) {
   out.x = a.y * b.z - a.z * b.y;
@@ -30,9 +21,36 @@ function vec3Normalize(v) {
 }
 
 /**
- * Terrain mesh builder
+ * Bilinear interpolation for height sampling
  */
-class FlatTerrainBuilder {
+function sampleHeightBilinear(heightData, tileSize, u, v) {
+  // u, v are in [0, 1]
+  const px = u * (tileSize - 1);
+  const py = v * (tileSize - 1);
+
+  const x0 = Math.floor(px);
+  const y0 = Math.floor(py);
+  const x1 = Math.min(x0 + 1, tileSize - 1);
+  const y1 = Math.min(y0 + 1, tileSize - 1);
+
+  const fx = px - x0;
+  const fy = py - y0;
+
+  const h00 = heightData[y0 * tileSize + x0] || 0;
+  const h10 = heightData[y0 * tileSize + x1] || 0;
+  const h01 = heightData[y1 * tileSize + x0] || 0;
+  const h11 = heightData[y1 * tileSize + x1] || 0;
+
+  const h0 = h00 * (1 - fx) + h10 * fx;
+  const h1 = h01 * (1 - fx) + h11 * fx;
+
+  return h0 * (1 - fy) + h1 * fy;
+}
+
+/**
+ * Terrain mesh builder for Mapbox tiles
+ */
+class TileTerrainBuilder {
   constructor() {
     this._params = null;
   }
@@ -42,41 +60,53 @@ class FlatTerrainBuilder {
   }
 
   /**
-   * Build the terrain mesh
+   * Build terrain mesh from Mapbox tile data
    */
-  build() {
-    const { size, resolution, heightData, worldX, worldY } = this._params;
+  buildTile() {
+    const {
+      resolution,
+      heightData,
+      tileSize,
+      worldMinX, worldMaxX,
+      worldMinZ, worldMaxZ,
+      heightScale
+    } = this._params;
+
     const gridSize = resolution + 1;
-    const step = size / resolution;
+    const worldWidth = worldMaxX - worldMinX;
+    const worldDepth = worldMaxZ - worldMinZ;
 
     // Generate positions and other attributes
     const positions = new Float32Array(gridSize * gridSize * 3);
     const colors = new Float32Array(gridSize * gridSize * 3);
     const coords = new Float32Array(gridSize * gridSize * 3);
 
-    for (let y = 0; y < gridSize; y++) {
-      for (let x = 0; x < gridSize; x++) {
-        const idx = (y * gridSize + x) * 3;
-        const heightIdx = y * gridSize + x;
+    for (let gy = 0; gy < gridSize; gy++) {
+      for (let gx = 0; gx < gridSize; gx++) {
+        const idx = (gy * gridSize + gx) * 3;
 
-        const height = heightData[heightIdx] || 0;
+        // Normalized coordinates [0, 1]
+        const u = gx / resolution;
+        const v = gy / resolution;
 
-        // Position (X = east, Y = up, Z = north)
-        const posX = worldX + x * step;
-        const posZ = worldY + y * step;
+        // Sample height from tile data with bilinear interpolation
+        const height = sampleHeightBilinear(heightData, tileSize, u, v) * heightScale;
+
+        // World position
+        const posX = worldMinX + u * worldWidth;
+        const posZ = worldMinZ + v * worldDepth;
 
         positions[idx] = posX;
         positions[idx + 1] = height;
         positions[idx + 2] = posZ;
 
-        // Coords (world space position for texturing)
+        // Coords for texturing
         coords[idx] = posX;
         coords[idx + 1] = height;
         coords[idx + 2] = posZ;
 
-        // Color based on height (terrain coloring)
-        const normalizedHeight = Math.max(0, Math.min(1, height / 4000));
-        const color = this._getTerrainColor(normalizedHeight, height);
+        // Color based on height
+        const color = this._getTerrainColor(height);
         colors[idx] = color.r;
         colors[idx + 1] = color.g;
         colors[idx + 2] = color.b;
@@ -143,6 +173,9 @@ class FlatTerrainBuilder {
    */
   _generateNormals(positions, indices, gridSize) {
     const normals = new Float32Array(positions.length);
+    const _V1 = { x: 0, y: 0, z: 0 };
+    const _V2 = { x: 0, y: 0, z: 0 };
+    const _V3 = { x: 0, y: 0, z: 0 };
 
     // Accumulate face normals to vertices
     for (let i = 0; i < indices.length; i += 3) {
@@ -200,7 +233,7 @@ class FlatTerrainBuilder {
   /**
    * Get terrain color based on height
    */
-  _getTerrainColor(normalizedHeight, absoluteHeight) {
+  _getTerrainColor(absoluteHeight) {
     // Color stops (height in meters)
     const waterLevel = 0;
     const beachLevel = 10;
@@ -253,13 +286,13 @@ class FlatTerrainBuilder {
 }
 
 // Worker instance
-const _builder = new FlatTerrainBuilder();
+const _builder = new TileTerrainBuilder();
 
 // Handle messages
 self.onmessage = (msg) => {
-  if (msg.data.subject === 'build_chunk') {
+  if (msg.data.subject === 'build_tile') {
     _builder.init(msg.data.params);
-    const result = _builder.build();
-    self.postMessage({ subject: 'build_chunk_result', data: result });
+    const result = _builder.buildTile();
+    self.postMessage({ subject: 'build_tile_result', data: result });
   }
 };
