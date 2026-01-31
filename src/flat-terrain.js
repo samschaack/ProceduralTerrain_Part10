@@ -193,8 +193,12 @@ export const flat_terrain = (function() {
 
     update(cameraPosition) {
       // Update mesh position relative to camera (floating origin)
-      this._mesh.position.copy(cameraPosition).negate();
-      this._mesh.position.add(this._params.worldPosition);
+      // Vertices are in absolute world coordinates, so just offset by -cameraPosition
+      this._mesh.position.set(
+        -cameraPosition.x,
+        -cameraPosition.y,
+        -cameraPosition.z
+      );
     }
 
     destroy() {
@@ -233,6 +237,10 @@ export const flat_terrain = (function() {
       this._mapboxToken = '';
       this._mapboxZoom = 12;
       this._terrainProvider = null;
+
+      // Chunk loading throttling
+      this._loadingChunks = 0;
+      this._maxConcurrentLoads = 4; // Limit concurrent chunk loads
 
       this._init();
     }
@@ -500,14 +508,12 @@ export const flat_terrain = (function() {
       const cameraPos = this._params.camera.position;
 
       // Recycle old chunks
-      if (!this._workerPool.busy) {
-        for (const chunkData of this._oldChunks) {
-          if (chunkData.chunk) {
-            chunkData.chunk.destroy();
-          }
+      for (const chunkData of this._oldChunks) {
+        if (chunkData.chunk) {
+          chunkData.chunk.destroy();
         }
-        this._oldChunks = [];
       }
+      this._oldChunks = [];
 
       // Build quadtree
       const nodes = this._buildQuadTree(cameraPos);
@@ -524,14 +530,23 @@ export const flat_terrain = (function() {
         }
       }
 
-      // Create new chunks (non-blocking - uses promises internally)
+      // Sort nodes by distance to camera (prioritize closer chunks)
+      nodes.sort((a, b) => {
+        const distA = Math.sqrt((a.center.x - cameraPos.x) ** 2 + (a.center.y - cameraPos.z) ** 2);
+        const distB = Math.sqrt((b.center.x - cameraPos.x) ** 2 + (b.center.y - cameraPos.z) ** 2);
+        return distA - distB;
+      });
+
+      // Create new chunks (limited concurrent loads to prevent blocking)
       for (const node of nodes) {
-        if (!this._chunks[node.key]) {
-          // Mark as pending
+        if (!this._chunks[node.key] && this._loadingChunks < this._maxConcurrentLoads) {
+          // Mark as pending and increment loading counter
           this._chunks[node.key] = { pending: true, node };
+          this._loadingChunks++;
 
           // Start async chunk creation (does not block)
           this._createChunk(node).then(({ chunk, node }) => {
+            this._loadingChunks--;
             if (this._chunks[node.key]) {
               this._chunks[node.key] = { chunk, node, pending: false };
               chunk.show();
@@ -540,6 +555,7 @@ export const flat_terrain = (function() {
               chunk.destroy();
             }
           }).catch(err => {
+            this._loadingChunks--;
             console.error('Error creating chunk:', err);
             delete this._chunks[node.key];
           });
