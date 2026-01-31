@@ -127,7 +127,7 @@ export const mapbox_terrain = (function() {
    */
   class MapboxTerrainProvider {
     constructor(params = {}) {
-      this._accessToken = params.accessToken || '';
+      this._accessToken = new URLSearchParams(location.search).get('token');
       this._zoom = params.zoom || 12;
       this._tileCache = new TileCache(params.cacheSize || 256);
       this._loadingTracker = new LoadingTracker();
@@ -202,9 +202,16 @@ export const mapbox_terrain = (function() {
     }
 
     async _fetchAndDecodeTile(z, x, y) {
-      const url = this._getTileUrl(z, x, y);
+      let url = this._getTileUrl(z, x, y);
 
-      return new Promise((resolve, reject) => {
+      return new Promise(async (resolve, reject) => {
+        const blob = await (await fetch(url, {
+          mode: 'cors',
+          credentials: 'omit' // Necessary for strict COEP
+        })).blob();
+
+        url = URL.createObjectURL(blob);
+        
         const img = new Image();
         img.crossOrigin = 'anonymous';
 

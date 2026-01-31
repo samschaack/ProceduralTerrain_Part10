@@ -10,7 +10,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 
-const PORT = process.argv[2] || 8080;
+const PORT = process.argv[2] || 8000;
 
 const MIME_TYPES = {
   '.html': 'text/html',

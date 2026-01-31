@@ -81,54 +81,54 @@ export const controls = (function() {
     }
 
     _onKeyDown(event) {
-      switch (event.keyCode) {
+      switch (event.key) {
         case 38: // up
-        case 87: // w
+        case 'w': // w
           this._move.forward = true;
           break;
         case 37: // left
-        case 65: // a
+        case 'a': // a
           this._move.left = true;
           break;
         case 40: // down
-        case 83: // s
+        case 's': // s
           this._move.backward = true;
           break;
         case 39: // right
-        case 68: // d
+        case 'd': // d
           this._move.right = true;
           break;
-        case 33: // PG_UP
+        case 'e': // PG_UP
           this._move.up = true;
           break;
-        case 34: // PG_DOWN
+        case 'q': // PG_DOWN
           this._move.down = true;
           break;
       }
     }
 
     _onKeyUp(event) {
-      switch(event.keyCode) {
+      switch(event.key) {
         case 38: // up
-        case 87: // w
+        case 'w': // w
           this._move.forward = false;
           break;
         case 37: // left
-        case 65: // a
+        case 'a': // a
           this._move.left = false;
           break;
         case 40: // down
-        case 83: // s
+        case 's': // s
           this._move.backward = false;
           break;
         case 39: // right
-        case 68: // d
+        case 'd': // d
           this._move.right = false;
           break;
-        case 33: // PG_UP
+        case 'e': // PG_UP
           this._move.up = false;
           break;
-        case 34: // PG_DOWN
+        case 'q': // PG_DOWN
           this._move.down = false;
           break;
       }
