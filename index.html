@@ -1,11 +1,70 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Procedural Planet</title>
+  <title>Mapbox Terrain Viewer</title>
   <link rel="stylesheet" type="text/css" href="base.css">
+  <style>
+    #instructions {
+      position: fixed;
+      bottom: 20px;
+      left: 20px;
+      background: rgba(0, 0, 0, 0.7);
+      color: white;
+      padding: 15px;
+      border-radius: 8px;
+      font-family: monospace;
+      font-size: 12px;
+      max-width: 350px;
+      z-index: 1000;
+    }
+    #instructions h3 {
+      margin: 0 0 10px 0;
+      font-size: 14px;
+    }
+    #instructions ul {
+      margin: 0;
+      padding-left: 20px;
+    }
+    #instructions li {
+      margin: 5px 0;
+    }
+    #instructions .warning {
+      color: #ffcc00;
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid #444;
+    }
+    #instructions code {
+      background: #333;
+      padding: 2px 5px;
+      border-radius: 3px;
+    }
+  </style>
 </head>
 <body>
   <div id="target"></div>
+  <div id="instructions">
+    <h3>Mapbox Terrain Viewer</h3>
+    <ul>
+      <li>Click to enable mouse control</li>
+      <li><strong>WASD</strong> - Move around</li>
+      <li><strong>PgUp/PgDn</strong> - Move up/down</li>
+      <li><strong>Mouse</strong> - Look around</li>
+      <li><strong>ESC</strong> - Release mouse</li>
+    </ul>
+    <p>Open the GUI (top right) to enter your Mapbox access token and configure terrain settings.</p>
+    <div id="warning-container"></div>
+  </div>
+  <script>
+    // Check for SharedArrayBuffer support
+    if (typeof SharedArrayBuffer === 'undefined') {
+      document.getElementById('warning-container').innerHTML =
+        '<p class="warning"><strong>Warning:</strong> SharedArrayBuffer not available. Run with: <code>node server.js</code></p>';
+    } else if (typeof crossOriginIsolated !== 'undefined' && !crossOriginIsolated) {
+      document.getElementById('warning-container').innerHTML =
+        '<p class="warning"><strong>Warning:</strong> crossOriginIsolated is false. For full functionality, run with: <code>node server.js</code></p>';
+    }
+  </script>
   <script src="./src/main.js" type="module">
   </script>
 </body>
