@@ -357,24 +357,31 @@ export const flat_terrain = (function() {
 
     /**
      * Convert world position (meters from center) to lon/lat
+     * Note: X axis is negated so that when looking north (+Z), east is on the right (-X)
+     * This matches standard geographic map orientation
      */
     worldToLonLat(worldX, worldZ) {
       const metersPerDegreeLon = EARTH_CIRCUMFERENCE * Math.cos(this._centerLat * Math.PI / 180) / 360;
       const metersPerDegreeLat = EARTH_CIRCUMFERENCE / 360;
 
-      const lon = this._centerLon + worldX / metersPerDegreeLon;
+      // Negate worldX because our world has west=+X, east=-X
+      const lon = this._centerLon - worldX / metersPerDegreeLon;
       const lat = this._centerLat + worldZ / metersPerDegreeLat;
       return { lon, lat };
     }
 
     /**
      * Convert lon/lat to world position (meters from center)
+     * Note: X axis is negated so that when looking north (+Z), east is on the right (-X)
+     * This matches standard geographic map orientation
      */
     lonLatToWorld(lon, lat) {
       const metersPerDegreeLon = EARTH_CIRCUMFERENCE * Math.cos(this._centerLat * Math.PI / 180) / 360;
       const metersPerDegreeLat = EARTH_CIRCUMFERENCE / 360;
 
-      const worldX = (lon - this._centerLon) * metersPerDegreeLon;
+      // Negate X so west=+X and east=-X
+      // This way when camera looks north (+Z), right side (-X) = east
+      const worldX = -(lon - this._centerLon) * metersPerDegreeLon;
       const worldZ = (lat - this._centerLat) * metersPerDegreeLat;
       return { x: worldX, z: worldZ };
     }
@@ -416,14 +423,15 @@ export const flat_terrain = (function() {
       const bounds = getTileBounds(z, x, y);
 
       // Convert tile bounds to world coordinates
+      // Note: After X negation, east has smaller X than west, so use min/max
       const sw = this.lonLatToWorld(bounds.west, bounds.south);
       const ne = this.lonLatToWorld(bounds.east, bounds.north);
 
       const worldBounds = {
-        minX: sw.x,
-        maxX: ne.x,
-        minZ: sw.z,
-        maxZ: ne.z
+        minX: Math.min(sw.x, ne.x),
+        maxX: Math.max(sw.x, ne.x),
+        minZ: Math.min(sw.z, ne.z),
+        maxZ: Math.max(sw.z, ne.z)
       };
 
       // Calculate tile center in world coords

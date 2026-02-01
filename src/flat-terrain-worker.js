@@ -22,12 +22,12 @@ function vec3Normalize(v) {
 
 /**
  * Bilinear interpolation for height sampling
- * Note: We flip both u and v because:
- * - Tile image y=0 is NORTH but mesh v=0 is placed at worldMinZ (SOUTH)
- * - Tile image x=0 is WEST but needs to be flipped for correct east-west orientation
+ * We flip both u and v because:
+ * - v flip: Tile image y=0 is NORTH but mesh v=0 is at worldMinZ (SOUTH)
+ * - u flip: After X-axis negation in world coords, u=0 is east but tile px=0 is west
  */
 function sampleHeightBilinear(heightData, tileSize, u, v) {
-  // Flip both coordinates to match tile image layout to world coordinates
+  // Flip both coordinates to match tile image layout to mesh layout
   u = 1 - u;
   v = 1 - v;
 
