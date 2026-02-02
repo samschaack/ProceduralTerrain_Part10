@@ -69,7 +69,7 @@ class ProceduralTerrain_Demo extends game.Game {
 
 
 function _Main() {
-  _APP = new ProceduralTerrain_Demo();
+  _APP = window._APP = new ProceduralTerrain_Demo();
 }
 
 _Main();

@@ -45,7 +45,7 @@ export const controls = (function() {
       this._standing = true;
       this._velocity = new THREE.Vector3(0, 0, 0);
       this._decceleration = new THREE.Vector3(-10, -10, -10);
-      this._acceleration = new THREE.Vector3(12, 12, 12);
+      this._acceleration = new THREE.Vector3(18, 18, 18);
 
       this._SetupPointerLock();
 
@@ -67,7 +67,7 @@ export const controls = (function() {
 
     _InitGUI() {
       this._params.guiParams.camera = {
-        acceleration_x: 12,
+        acceleration_x: 18,
       };
 
       const rollup = this._params.gui.addFolder('Camera.FPS');

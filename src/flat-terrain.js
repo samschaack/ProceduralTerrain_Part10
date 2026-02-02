@@ -1,12 +1,11 @@
 /**
- * Flat terrain system using Mapbox terrain-rgb tiles
- * Replaces the spherical planet terrain with a flat world
+ * Flat terrain system using Mapbox terrain-rgb tiles with LOD
+ * Uses Mapbox tile pyramid directly as quadtree for seamless LOD
  */
 
 import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.125/build/three.module.js';
 
 import {mapbox_terrain} from './mapbox-terrain.js';
-import {terrain_chunk} from './terrain-chunk.js';
 import {terrain_shader} from './terrain-shader.js';
 
 export const flat_terrain = (function() {
@@ -14,14 +13,19 @@ export const flat_terrain = (function() {
   const _NUM_WORKERS = 7;
 
   // Default location: Swiss Alps (Matterhorn area)
-  const DEFAULT_CENTER_LAT = 39.0689;
-  const DEFAULT_CENTER_LON = -108.5643;
+  // const DEFAULT_CENTER_LAT = 45.9763;
+  // const DEFAULT_CENTER_LON = 7.6586;
 
-  // Meters per world unit (1 unit = 1 meter)
-  const METERS_PER_UNIT = 1;
+  // GJ
+  // const DEFAULT_CENTER_LAT = 39.0689;
+  // const DEFAULT_CENTER_LON = -108.5643;
+  
+  // GREENFIELD
+  const DEFAULT_CENTER_LAT = 41.3058;
+  const DEFAULT_CENTER_LON = -94.4592;
 
-  // Meters per degree at equator
-  const METERS_PER_DEGREE = 111320;
+  // Earth circumference at equator in meters
+  const EARTH_CIRCUMFERENCE = 40075016.686;
 
   let _workerIds = 0;
 
@@ -65,6 +69,10 @@ export const flat_terrain = (function() {
       return this._queue.length > 0 || Object.keys(this._busy).length > 0;
     }
 
+    get queueLength() {
+      return this._queue.length;
+    }
+
     enqueue(workItem, resolve) {
       this._queue.push([workItem, resolve]);
       this._pump();
@@ -88,44 +96,61 @@ export const flat_terrain = (function() {
   }
 
 
+  // ============== Tile Math Utilities ==============
+
   /**
-   * Simple 2D quadtree for flat terrain LOD
+   * Convert longitude to tile X at given zoom
    */
-  class QuadTreeNode {
-    constructor(x, y, size, level) {
-      this.x = x;
-      this.y = y;
-      this.size = size;
-      this.level = level;
-      this.children = null;
-    }
+  function lon2tileX(lon, zoom) {
+    return Math.floor((lon + 180) / 360 * Math.pow(2, zoom));
+  }
 
-    subdivide() {
-      const halfSize = this.size / 2;
-      this.children = [
-        new QuadTreeNode(this.x, this.y, halfSize, this.level + 1),
-        new QuadTreeNode(this.x + halfSize, this.y, halfSize, this.level + 1),
-        new QuadTreeNode(this.x, this.y + halfSize, halfSize, this.level + 1),
-        new QuadTreeNode(this.x + halfSize, this.y + halfSize, halfSize, this.level + 1)
-      ];
-      return this.children;
-    }
+  /**
+   * Convert latitude to tile Y at given zoom
+   */
+  function lat2tileY(lat, zoom) {
+    const latRad = lat * Math.PI / 180;
+    return Math.floor((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * Math.pow(2, zoom));
+  }
 
-    get center() {
-      return {
-        x: this.x + this.size / 2,
-        y: this.y + this.size / 2
-      };
-    }
+  /**
+   * Convert tile X to longitude (west edge)
+   */
+  function tileX2lon(x, zoom) {
+    return x / Math.pow(2, zoom) * 360 - 180;
+  }
 
-    get key() {
-      return `${this.x}/${this.y}/${this.size}`;
-    }
+  /**
+   * Convert tile Y to latitude (north edge)
+   */
+  function tileY2lat(y, zoom) {
+    const n = Math.PI - 2 * Math.PI * y / Math.pow(2, zoom);
+    return 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+  }
+
+  /**
+   * Get tile bounds in lon/lat
+   */
+  function getTileBounds(z, x, y) {
+    return {
+      west: tileX2lon(x, z),
+      east: tileX2lon(x + 1, z),
+      north: tileY2lat(y, z),
+      south: tileY2lat(y + 1, z)
+    };
+  }
+
+  /**
+   * Get approximate tile size in meters at given latitude and zoom
+   */
+  function getTileSizeMeters(lat, zoom) {
+    const metersPerTile = EARTH_CIRCUMFERENCE * Math.cos(lat * Math.PI / 180) / Math.pow(2, zoom);
+    return metersPerTile;
   }
 
 
   /**
-   * Flat terrain chunk - represents a single terrain tile
+   * Flat terrain chunk - represents a single Mapbox tile
    */
   class FlatTerrainChunk {
     constructor(params) {
@@ -133,7 +158,6 @@ export const flat_terrain = (function() {
       this._mesh = null;
       this._geometry = null;
       this._visible = false;
-      this._rebuildData = null;
 
       this._init();
     }
@@ -149,9 +173,6 @@ export const flat_terrain = (function() {
     }
 
     get params() { return this._params; }
-    set params(p) { this._params = p; }
-
-    get rebuildData() { return this._rebuildData; }
 
     rebuildFromData(data) {
       this._geometry.setAttribute('position', new THREE.Float32BufferAttribute(data.positions, 3));
@@ -167,14 +188,6 @@ export const flat_terrain = (function() {
 
       this._geometry.computeBoundingBox();
       this._geometry.computeBoundingSphere();
-
-      this._rebuildData = {
-        positions: data.positions,
-        normals: data.normals,
-        colours: data.colours,
-        coords: data.coords,
-        indices: data.indices
-      };
     }
 
     show() {
@@ -192,8 +205,7 @@ export const flat_terrain = (function() {
     }
 
     update(cameraPosition) {
-      // Update mesh position relative to camera (floating origin)
-      // Vertices are in absolute world coordinates, so just offset by -cameraPosition
+      // Floating origin - offset mesh by negative camera position
       this._mesh.position.set(
         -cameraPosition.x,
         -cameraPosition.y,
@@ -205,42 +217,35 @@ export const flat_terrain = (function() {
       this._params.group.remove(this._mesh);
       this._geometry.dispose();
     }
-
-    setWireframe(enabled) {
-      this._params.material.wireframe = enabled;
-    }
   }
 
 
   /**
-   * Main terrain manager for flat Mapbox terrain
+   * Main terrain manager using Mapbox tile pyramid for LOD
    */
   class FlatTerrainManager {
     constructor(params) {
       this._params = params;
       this._chunks = {};
-      this._oldChunks = [];
-      this._chunkPool = {};
 
-      // Geographic center
+      // Geographic center (world origin)
       this._centerLon = DEFAULT_CENTER_LON;
       this._centerLat = DEFAULT_CENTER_LAT;
 
-      // Terrain settings
-      this._chunkSize = 1000; // meters
-      this._maxChunkSize = 16000; // meters
-      this._resolution = 64; // vertices per side
-      this._viewDistance = 8000; // meters
+      // LOD settings
+      this._minZoom = 11;      // Farthest tiles (largest)
+      this._maxZoom = 14;     // Nearest tiles (smallest, most detailed)
+      this._lodFactor = 1.5;  // Distance multiplier for LOD transitions
+      this._resolution = 64;  // Vertices per tile edge
       this._heightScale = 1.0;
 
       // Mapbox
       this._mapboxToken = '';
-      this._mapboxZoom = 12;
       this._terrainProvider = null;
 
       // Chunk loading throttling
       this._loadingChunks = 0;
-      this._maxConcurrentLoads = 4; // Limit concurrent chunk loads
+      this._maxConcurrentLoads = 6;
 
       this._init();
     }
@@ -281,9 +286,9 @@ export const flat_terrain = (function() {
     _initTerrainProvider() {
       this._terrainProvider = new mapbox_terrain.MapboxTerrainProvider({
         accessToken: this._mapboxToken,
-        zoom: this._mapboxZoom,
+        zoom: this._maxZoom,  // Provider uses max zoom for fetching
         heightScale: this._heightScale,
-        cacheSize: 512
+        cacheSize: 1024
       });
     }
 
@@ -293,11 +298,12 @@ export const flat_terrain = (function() {
 
       guiParams.mapbox = {
         accessToken: this._mapboxToken,
-        zoom: this._mapboxZoom,
+        minZoom: this._minZoom,
+        maxZoom: this._maxZoom,
+        lodFactor: this._lodFactor,
         centerLat: this._centerLat,
         centerLon: this._centerLon,
         heightScale: this._heightScale,
-        viewDistance: this._viewDistance,
         wireframe: false
       };
 
@@ -309,10 +315,19 @@ export const flat_terrain = (function() {
         this._rebuildAllChunks();
       });
 
-      folder.add(guiParams.mapbox, 'zoom', 1, 15, 1).name('Tile Zoom').onChange((v) => {
-        this._mapboxZoom = v;
+      folder.add(guiParams.mapbox, 'minZoom', 1, 12, 1).name('Min Zoom (far)').onChange((v) => {
+        this._minZoom = v;
+        this._rebuildAllChunks();
+      });
+
+      folder.add(guiParams.mapbox, 'maxZoom', 8, 15, 1).name('Max Zoom (near)').onChange((v) => {
+        this._maxZoom = v;
         this._terrainProvider.zoom = v;
         this._rebuildAllChunks();
+      });
+
+      folder.add(guiParams.mapbox, 'lodFactor', 0.5, 3.0).name('LOD Factor').onChange((v) => {
+        this._lodFactor = v;
       });
 
       folder.add(guiParams.mapbox, 'centerLat', -85, 85).name('Center Latitude').onChange((v) => {
@@ -331,10 +346,6 @@ export const flat_terrain = (function() {
         this._rebuildAllChunks();
       });
 
-      folder.add(guiParams.mapbox, 'viewDistance', 1000, 50000).name('View Distance').onChange((v) => {
-        this._viewDistance = v;
-      });
-
       folder.add(guiParams.mapbox, 'wireframe').name('Wireframe').onChange((v) => {
         this._material.wireframe = v;
       });
@@ -343,172 +354,188 @@ export const flat_terrain = (function() {
     }
 
     _rebuildAllChunks() {
-      // Clear all chunks and rebuild
+      // Destroy all existing chunks
       for (const key in this._chunks) {
-        this._oldChunks.push(this._chunks[key]);
+        if (this._chunks[key].chunk) {
+          this._chunks[key].chunk.destroy();
+        }
       }
       this._chunks = {};
     }
 
     /**
-     * Convert world position to lon/lat
+     * Convert world position (meters from center) to lon/lat
      */
-    worldToLonLat(worldX, worldY) {
-      const metersPerDegree = METERS_PER_DEGREE * Math.cos(this._centerLat * Math.PI / 180);
-      const lon = this._centerLon + worldX / metersPerDegree;
-      const lat = this._centerLat + worldY / METERS_PER_DEGREE;
+    worldToLonLat(worldX, worldZ) {
+      const metersPerDegreeLon = EARTH_CIRCUMFERENCE * Math.cos(this._centerLat * Math.PI / 180) / 360;
+      const metersPerDegreeLat = EARTH_CIRCUMFERENCE / 360;
+
+      const lon = this._centerLon + worldX / metersPerDegreeLon;
+      const lat = this._centerLat + worldZ / metersPerDegreeLat;
       return { lon, lat };
     }
 
     /**
-     * Convert lon/lat to world position
+     * Convert lon/lat to world position (meters from center)
      */
     lonLatToWorld(lon, lat) {
-      const metersPerDegree = METERS_PER_DEGREE * Math.cos(this._centerLat * Math.PI / 180);
-      const worldX = (lon - this._centerLon) * metersPerDegree;
-      const worldY = (lat - this._centerLat) * METERS_PER_DEGREE;
-      return { x: worldX, y: worldY };
+      const metersPerDegreeLon = EARTH_CIRCUMFERENCE * Math.cos(this._centerLat * Math.PI / 180) / 360;
+      const metersPerDegreeLat = EARTH_CIRCUMFERENCE / 360;
+
+      const worldX = (lon - this._centerLon) * metersPerDegreeLon;
+      const worldZ = (lat - this._centerLat) * metersPerDegreeLat;
+      return { x: worldX, z: worldZ };
     }
 
     /**
-     * Get the set of chunk keys that should be visible for a given camera position
-     * Uses a fixed grid - chunks are at fixed world positions (multiples of chunkSize)
+     * Get the set of tiles that should be visible using quadtree LOD
+     * Returns Map of key -> {z, x, y, bounds, worldBounds}
      */
-    _getVisibleChunkKeys(cameraPos) {
-      const keys = new Set();
-      const chunkSize = this._chunkSize;
-      const viewDist = this._viewDistance;
+    _getVisibleTiles(cameraPos) {
+      const tiles = new Map();
+      const cameraLonLat = this.worldToLonLat(cameraPos.x, cameraPos.z);
 
-      // Calculate grid range around camera
-      const minX = Math.floor((cameraPos.x - viewDist) / chunkSize) * chunkSize;
-      const maxX = Math.floor((cameraPos.x + viewDist) / chunkSize) * chunkSize;
-      const minZ = Math.floor((cameraPos.z - viewDist) / chunkSize) * chunkSize;
-      const maxZ = Math.floor((cameraPos.z + viewDist) / chunkSize) * chunkSize;
+      // Start with tiles at minimum zoom level around the camera
+      const startZoom = this._minZoom;
+      const centerTileX = lon2tileX(cameraLonLat.lon, startZoom);
+      const centerTileY = lat2tileY(cameraLonLat.lat, startZoom);
 
-      // Add all chunks within view distance
-      for (let x = minX; x <= maxX; x += chunkSize) {
-        for (let z = minZ; z <= maxZ; z += chunkSize) {
-          // Check if chunk center is within view distance
-          const centerX = x + chunkSize / 2;
-          const centerZ = z + chunkSize / 2;
-          const dist = Math.sqrt(
-            (centerX - cameraPos.x) ** 2 +
-            (centerZ - cameraPos.z) ** 2
-          );
+      // Check tiles in a radius around the center tile at min zoom
+      const radius = 3;  // Check 7x7 grid at min zoom
+      for (let dx = -radius; dx <= radius; dx++) {
+        for (let dy = -radius; dy <= radius; dy++) {
+          const tileX = centerTileX + dx;
+          const tileY = centerTileY + dy;
 
-          if (dist < viewDist + chunkSize) {
-            keys.add(`${x}/${z}/${chunkSize}`);
-          }
+          // Skip invalid tiles
+          if (tileY < 0 || tileY >= Math.pow(2, startZoom)) continue;
+
+          this._subdivideOrAddTile(startZoom, tileX, tileY, cameraPos, tiles);
         }
       }
 
-      return keys;
+      return tiles;
     }
 
     /**
-     * Create a terrain chunk at a fixed grid position
+     * Recursively subdivide tile or add it to visible set
      */
-    async _createChunkAtGrid(x, z, size) {
-      const node = { x, y: z, size, key: `${x}/${z}/${size}` };
+    _subdivideOrAddTile(z, x, y, cameraPos, tiles) {
+      const bounds = getTileBounds(z, x, y);
 
-      // Calculate bounds in lon/lat
-      const sw = this.worldToLonLat(x, z);
-      const ne = this.worldToLonLat(x + size, z + size);
+      // Convert tile bounds to world coordinates
+      const sw = this.lonLatToWorld(bounds.west, bounds.south);
+      const ne = this.lonLatToWorld(bounds.east, bounds.north);
 
-      // Prefetch required tiles
-      await this._terrainProvider.prefetchTiles(sw.lon, sw.lat, ne.lon, ne.lat);
+      const worldBounds = {
+        minX: sw.x,
+        maxX: ne.x,
+        minZ: sw.z,
+        maxZ: ne.z
+      };
 
-      // Get height data for this chunk
-      const heightData = await this._getHeightDataForChunk(node);
+      // Calculate tile center in world coords
+      const tileCenterX = (worldBounds.minX + worldBounds.maxX) / 2;
+      const tileCenterZ = (worldBounds.minZ + worldBounds.maxZ) / 2;
+
+      // Distance from camera to tile center
+      const distance = Math.sqrt(
+        (tileCenterX - cameraPos.x) ** 2 +
+        (tileCenterZ - cameraPos.z) ** 2
+      );
+
+      // Tile size in meters
+      const tileSize = Math.abs(worldBounds.maxX - worldBounds.minX);
+
+      // LOD decision: subdivide if close enough and not at max zoom
+      const lodThreshold = tileSize * this._lodFactor;
+      const shouldSubdivide = distance < lodThreshold && z < this._maxZoom;
+
+      // Check if tile is too far (rough culling)
+      const maxViewDistance = getTileSizeMeters(this._centerLat, this._minZoom) * 4;
+      if (distance > maxViewDistance) {
+        return;  // Skip this tile entirely
+      }
+
+      if (shouldSubdivide) {
+        // Subdivide into 4 child tiles at next zoom level
+        const childZ = z + 1;
+        const childX = x * 2;
+        const childY = y * 2;
+
+        this._subdivideOrAddTile(childZ, childX, childY, cameraPos, tiles);
+        this._subdivideOrAddTile(childZ, childX + 1, childY, cameraPos, tiles);
+        this._subdivideOrAddTile(childZ, childX, childY + 1, cameraPos, tiles);
+        this._subdivideOrAddTile(childZ, childX + 1, childY + 1, cameraPos, tiles);
+      } else {
+        // Add this tile to visible set
+        const key = `${z}/${x}/${y}`;
+        tiles.set(key, { z, x, y, bounds, worldBounds });
+      }
+    }
+
+    /**
+     * Create a terrain chunk for a Mapbox tile
+     */
+    async _createTileChunk(z, x, y, worldBounds) {
+      const key = `${z}/${x}/${y}`;
+
+      // Load the tile height data
+      const tileData = await this._terrainProvider.loadTile(z, x, y);
 
       // Create chunk params
       const chunkParams = {
         group: this._group,
         material: this._material,
-        worldPosition: new THREE.Vector3(x + size / 2, 0, z + size / 2),
-        size: size,
-        resolution: this._resolution,
-        node: node
+        tileKey: key,
+        zoom: z,
+        tileX: x,
+        tileY: y
       };
 
-      // Create chunk
       const chunk = new FlatTerrainChunk(chunkParams);
       chunk.hide();
 
       // Send to worker for mesh building
       const workerParams = {
-        size: size,
         resolution: this._resolution,
-        heightData: heightData,
-        worldX: x,
-        worldY: z
+        heightData: tileData.heights,
+        colorData: tileData.colors,
+        tileSize: 512,  // Mapbox tiles are 512x512
+        worldMinX: worldBounds.minX,
+        worldMaxX: worldBounds.maxX,
+        worldMinZ: worldBounds.minZ,
+        worldMaxZ: worldBounds.maxZ,
+        heightScale: this._heightScale
       };
 
       return new Promise((resolve) => {
         this._workerPool.enqueue(
-          { subject: 'build_chunk', params: workerParams },
+          { subject: 'build_tile', params: workerParams },
           (result) => {
-            if (result.subject === 'build_chunk_result') {
+            if (result.subject === 'build_tile_result') {
               chunk.rebuildFromData(result.data);
             }
-            resolve({ chunk, key: node.key });
+            resolve({ chunk, key });
           }
         );
       });
     }
 
     /**
-     * Get height data grid for a chunk
-     * Uses parallel fetching for better performance
-     */
-    async _getHeightDataForChunk(node) {
-      const resolution = this._resolution + 1;
-      const heights = new Float32Array(resolution * resolution);
-
-      // Build array of height fetch promises
-      const promises = [];
-      const indices = [];
-
-      for (let y = 0; y < resolution; y++) {
-        for (let x = 0; x < resolution; x++) {
-          const worldX = node.x + (x / (resolution - 1)) * node.size;
-          const worldZ = node.y + (y / (resolution - 1)) * node.size;
-          const { lon, lat } = this.worldToLonLat(worldX, worldZ);
-
-          indices.push(y * resolution + x);
-          promises.push(
-            this._terrainProvider.getHeightAt(lon, lat).catch(() => 0)
-          );
-        }
-      }
-
-      // Fetch all heights in parallel
-      const results = await Promise.all(promises);
-
-      // Assign results to heights array
-      for (let i = 0; i < results.length; i++) {
-        heights[indices[i]] = results[i];
-      }
-
-      return heights;
-    }
-
-    /**
-     * Update terrain chunks based on camera position
-     * Called every frame by the entity system (synchronous)
+     * Update terrain - called every frame
      */
     Update(deltaTime) {
       const cameraPos = this._params.camera.position;
 
-      // Get set of chunk keys that should be visible
-      const visibleKeys = this._getVisibleChunkKeys(cameraPos);
+      // Get the set of tiles that should be visible
+      const visibleTiles = this._getVisibleTiles(cameraPos);
 
-      // Find chunks to remove (outside view distance and not loading)
+      // Find chunks to remove
       const chunksToRemove = [];
       for (const key in this._chunks) {
-        if (!visibleKeys.has(key)) {
+        if (!visibleTiles.has(key)) {
           const chunkData = this._chunks[key];
-          // Only remove if chunk is fully loaded (keep showing while loading)
           if (chunkData.chunk && !chunkData.pending) {
             chunksToRemove.push(key);
           }
@@ -524,52 +551,56 @@ export const flat_terrain = (function() {
         delete this._chunks[key];
       }
 
-      // Find chunks to create
-      const chunksToCreate = [];
-      for (const key of visibleKeys) {
+      // Find tiles to create (sorted by zoom level descending - higher detail first)
+      const tilesToCreate = [];
+      for (const [key, tileInfo] of visibleTiles) {
         if (!this._chunks[key]) {
-          chunksToCreate.push(key);
+          tilesToCreate.push({ key, ...tileInfo });
         }
       }
 
-      // Sort by distance to camera (prioritize closer chunks)
-      chunksToCreate.sort((a, b) => {
-        const [ax, az] = a.split('/').map(Number);
-        const [bx, bz] = b.split('/').map(Number);
-        const distA = Math.sqrt((ax + this._chunkSize/2 - cameraPos.x) ** 2 + (az + this._chunkSize/2 - cameraPos.z) ** 2);
-        const distB = Math.sqrt((bx + this._chunkSize/2 - cameraPos.x) ** 2 + (bz + this._chunkSize/2 - cameraPos.z) ** 2);
+      // Sort by zoom (higher zoom = more detail = prioritize) and distance
+      tilesToCreate.sort((a, b) => {
+        // Prioritize higher zoom levels
+        if (b.z !== a.z) return b.z - a.z;
+
+        // Then by distance
+        const distA = Math.sqrt(
+          ((a.worldBounds.minX + a.worldBounds.maxX) / 2 - cameraPos.x) ** 2 +
+          ((a.worldBounds.minZ + a.worldBounds.maxZ) / 2 - cameraPos.z) ** 2
+        );
+        const distB = Math.sqrt(
+          ((b.worldBounds.minX + b.worldBounds.maxX) / 2 - cameraPos.x) ** 2 +
+          ((b.worldBounds.minZ + b.worldBounds.maxZ) / 2 - cameraPos.z) ** 2
+        );
         return distA - distB;
       });
 
       // Create new chunks (limited concurrent loads)
-      for (const key of chunksToCreate) {
+      for (const tile of tilesToCreate) {
         if (this._loadingChunks >= this._maxConcurrentLoads) break;
 
-        // Parse key to get grid position
-        const [x, z, size] = key.split('/').map(Number);
-
-        // Mark as pending
-        this._chunks[key] = { pending: true, key };
+        this._chunks[tile.key] = { pending: true, key: tile.key };
         this._loadingChunks++;
 
-        // Start async chunk creation
-        this._createChunkAtGrid(x, z, size).then(({ chunk, key }) => {
-          this._loadingChunks--;
-          if (this._chunks[key]) {
-            this._chunks[key] = { chunk, key, pending: false };
-            chunk.show();
-          } else {
-            // Chunk was removed while building (camera moved away)
-            chunk.destroy();
-          }
-        }).catch(err => {
-          this._loadingChunks--;
-          console.error('Error creating chunk:', err);
-          delete this._chunks[key];
-        });
+        this._createTileChunk(tile.z, tile.x, tile.y, tile.worldBounds)
+          .then(({ chunk, key }) => {
+            this._loadingChunks--;
+            if (this._chunks[key]) {
+              this._chunks[key] = { chunk, key, pending: false };
+              chunk.show();
+            } else {
+              chunk.destroy();
+            }
+          })
+          .catch(err => {
+            this._loadingChunks--;
+            console.error('Error creating tile chunk:', err);
+            delete this._chunks[tile.key];
+          });
       }
 
-      // Update all visible chunks (both loading and loaded)
+      // Update all visible chunks
       for (const key in this._chunks) {
         const data = this._chunks[key];
         if (data.chunk && !data.pending) {
@@ -591,7 +622,6 @@ export const flat_terrain = (function() {
 
   return {
     FlatTerrainManager: FlatTerrainManager,
-    FlatTerrainChunk: FlatTerrainChunk,
-    QuadTreeNode: QuadTreeNode
+    FlatTerrainChunk: FlatTerrainChunk
   };
 })();

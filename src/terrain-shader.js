@@ -274,7 +274,7 @@ void main() {
   finalColour = lighting.xyz;
   // finalColour = vColor.xyz;
 
-  out_FragColor = vec4(finalColour, 1);
+  out_FragColor = vec4(vColor.xyz, 1);
   gl_FragDepth = log2(vFragDepth) * logDepthBufFC * 0.5;
 }
 

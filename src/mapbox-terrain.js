@@ -8,7 +8,7 @@
 export const mapbox_terrain = (function() {
 
   // Tile size in pixels
-  const TILE_SIZE = 256;
+  const TILE_SIZE = 512;
 
   // Convert longitude to tile X coordinate
   function lon2tileX(lon, zoom) {
@@ -160,8 +160,16 @@ export const mapbox_terrain = (function() {
       return this._heightScale;
     }
 
-    _getTileUrl(z, x, y) {
-      return `https://api.mapbox.com/v4/mapbox.terrain-rgb/${z}/${x}/${y}.pngraw?access_token=${this._accessToken}`;
+    _getTileUrl(z, x, y, api = 'terrain-rgb') {
+      return `https://api.mapbox.com/v4/mapbox.${api}/${z}/${x}/${y}@2x.pngraw?access_token=${this._accessToken}`;
+    }
+    
+    _getElevationTileUrl(z, x, y, api = 'terrain-rgb') {
+      return this._getTileUrl(z, x, y);
+    }
+    
+    _getSatelliteTileUrl(z, x, y) {
+      return this._getTileUrl(z, x, y, 'satellite');
     }
 
     _ensureCanvas() {
@@ -200,76 +208,127 @@ export const mapbox_terrain = (function() {
         this._loadingTracker.clearLoading(z, x, y);
       }
     }
+    
+    async _fetchBlob(url) {
+      return await (await fetch(url, { mode: 'cors', credentials: 'omit' })).blob();
+    }
 
     async _fetchAndDecodeTile(z, x, y) {
-      let url = this._getTileUrl(z, x, y);
+      const url = {
+        elevation: this._getElevationTileUrl(z, x, y),
+        satellite: this._getSatelliteTileUrl(z, x, y)
+      };
 
       return new Promise(async (resolve, reject) => {
-        const blob = await (await fetch(url, {
-          mode: 'cors',
-          credentials: 'omit' // Necessary for strict COEP
-        })).blob();
-
-        url = URL.createObjectURL(blob);
+        const [elevation, satellite] = await Promise.all([this._fetchBlob(url.elevation), this._fetchBlob(url.satellite)]);
         
-        const img = new Image();
-        img.crossOrigin = 'anonymous';
+        url.elevation = URL.createObjectURL(elevation);
+        url.satellite = URL.createObjectURL(satellite);
+        
+        const elevationPromise = new Promise(resolveElevation => {
+          const img = new Image();
+          img.crossOrigin = 'anonymous';
 
-        img.onload = () => {
-          this._ensureCanvas();
-          this._ctx.drawImage(img, 0, 0);
-          const imageData = this._ctx.getImageData(0, 0, TILE_SIZE, TILE_SIZE);
+          img.onload = () => {
+            this._ensureCanvas();
+            this._ctx.drawImage(img, 0, 0);
+            const imageData = this._ctx.getImageData(0, 0, TILE_SIZE, TILE_SIZE);
 
-          // Create height data array
-          const heights = new Float32Array(TILE_SIZE * TILE_SIZE);
-          const data = imageData.data;
+            // Create height data array
+            const heights = new Float32Array(TILE_SIZE * TILE_SIZE);
+            const data = imageData.data;
 
-          for (let i = 0; i < TILE_SIZE * TILE_SIZE; i++) {
-            const r = data[i * 4];
-            const g = data[i * 4 + 1];
-            const b = data[i * 4 + 2];
-            heights[i] = decodeHeight(r, g, b) * this._heightScale;
-          }
-
-          resolve({
-            heights: heights,
-            width: TILE_SIZE,
-            height: TILE_SIZE,
-            z: z,
-            x: x,
-            y: y,
-            bounds: {
-              west: tileX2lon(x, z),
-              east: tileX2lon(x + 1, z),
-              north: tileY2lat(y, z),
-              south: tileY2lat(y + 1, z)
+            for (let i = 0; i < TILE_SIZE * TILE_SIZE; i++) {
+              const r = data[i * 4];
+              const g = data[i * 4 + 1];
+              const b = data[i * 4 + 2];
+              heights[i] = decodeHeight(r, g, b) * this._heightScale;
             }
-          });
-        };
 
-        img.onerror = (e) => {
-          console.error(`Failed to load tile ${z}/${x}/${y}:`, e);
-          // Return zero heights on error
-          const heights = new Float32Array(TILE_SIZE * TILE_SIZE);
-          heights.fill(0);
-          resolve({
-            heights: heights,
-            width: TILE_SIZE,
-            height: TILE_SIZE,
-            z: z,
-            x: x,
-            y: y,
-            bounds: {
-              west: tileX2lon(x, z),
-              east: tileX2lon(x + 1, z),
-              north: tileY2lat(y, z),
-              south: tileY2lat(y + 1, z)
-            },
-            error: true
-          });
-        };
+            resolveElevation({
+              heights: heights,
+              width: TILE_SIZE,
+              height: TILE_SIZE,
+              z: z,
+              x: x,
+              y: y,
+              bounds: {
+                west: tileX2lon(x, z),
+                east: tileX2lon(x + 1, z),
+                north: tileY2lat(y, z),
+                south: tileY2lat(y + 1, z)
+              }
+            });
+          };
 
-        img.src = url;
+          img.onerror = (e) => {
+            console.error(`Failed to load tile ${z}/${x}/${y}:`, e);
+            // Return zero heights on error
+            const heights = new Float32Array(TILE_SIZE * TILE_SIZE);
+            heights.fill(0);
+            resolveElevation({
+              heights: heights,
+              width: TILE_SIZE,
+              height: TILE_SIZE,
+              z: z,
+              x: x,
+              y: y,
+              bounds: {
+                west: tileX2lon(x, z),
+                east: tileX2lon(x + 1, z),
+                north: tileY2lat(y, z),
+                south: tileY2lat(y + 1, z)
+              },
+              error: true
+            });
+          };
+
+          img.src = url.elevation;
+        });
+        
+        const satellitePromise = new Promise(resolveSatellite => {
+          const img = new Image();
+          img.crossOrigin = 'anonymous';
+
+          img.onload = () => {
+            this._ensureCanvas();
+            this._ctx.drawImage(img, 0, 0);
+            const numPixels = TILE_SIZE * TILE_SIZE;
+            const imageData = this._ctx.getImageData(0, 0, TILE_SIZE, TILE_SIZE);
+            const colors = new Uint8ClampedArray(3 * numPixels);
+            
+            for (let i = 0; i < numPixels; i += 1) {
+              const inputOffset = 4 * i;
+              const outputOffset = 3 * i;
+              
+              colors[outputOffset] = imageData.data[inputOffset];
+              colors[outputOffset + 1] = imageData.data[inputOffset + 1];
+              colors[outputOffset + 2] = imageData.data[inputOffset + 2];
+            }
+
+            resolveSatellite({
+              colors,
+            });
+          };
+
+          img.onerror = (e) => {
+            console.error(`Failed to load tile ${z}/${x}/${y}:`, e);
+            // Return zero heights on error
+            const colors = new Uint8ClampedArray(3 * TILE_SIZE * TILE_SIZE);
+            colors.fill(0);
+            
+            resolveSatellite({
+              colors,
+              error: true
+            });
+          };
+
+          img.src = url.satellite;
+        });
+        
+        const [tile, { colors }] = await Promise.all([elevationPromise, satellitePromise]);
+        
+        resolve(Object.assign(tile, { colors }));
       });
     }
 

@@ -2,7 +2,6 @@ import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.125/build/three.mod
 import {WEBGL} from 'https://cdn.jsdelivr.net/npm/three@0.125/examples/jsm/WebGL.js';
 import {graphics} from './graphics.js';
 
-
 export const game = (function() {
   return {
     Game: class {

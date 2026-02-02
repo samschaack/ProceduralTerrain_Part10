@@ -73,9 +73,11 @@ export const graphics = (function() {
       const far = 10000000.0;
       this.camera_ = new THREE.PerspectiveCamera(fov, aspect, near, far);
       this.camera_.position.set(75, 20, 0);
-
+      
       this.scene_ = new THREE.Scene();
       this.scene_.background = new THREE.Color(0xaaaaaa);
+      
+      Object.assign(window, { camera: this.camera, scene: this.scene });
 
       const renderPass = new RenderPass(this.scene_, this.camera_);
       const fxaaPass = new ShaderPass(FXAAShader);
