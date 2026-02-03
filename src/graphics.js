@@ -56,6 +56,7 @@ export const graphics = (function() {
       this._threejs.setPixelRatio(window.devicePixelRatio);
       this._threejs.setSize(window.innerWidth, window.innerHeight);
       this._threejs.autoClear = false;
+      this._threejs.shadowMap.enabled = true;
 
       const target = document.getElementById('target');
       target.appendChild(this._threejs.domElement);

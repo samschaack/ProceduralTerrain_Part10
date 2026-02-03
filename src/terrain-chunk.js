@@ -24,9 +24,9 @@ export const terrain_chunk = (function() {
     _Init(params) {
       this.geometry_ = new THREE.BufferGeometry();
       this.mesh_ = new THREE.Mesh(this.geometry_, params.material);
-      this.mesh_.castShadow = false;
+      this.mesh_.castShadow = true;
       this.mesh_.receiveShadow = true;
-      this.mesh_.frustumCulled = false;
+      this.mesh_.frustumCulled = true;
       this.params_.group.add(this.mesh_);
       this.Reinit(params);
     }

@@ -33,6 +33,7 @@ const lerpColor = (c1, c2, t) => ({
  */
 function sampleHeightBilinear(heightData, tileSize, u, v) {
   v = 1 - v;
+  u = 1 - u;
   // u, v are in [0, 1]
   const px = u * (tileSize - 1);
   const py = v * (tileSize - 1);
@@ -68,6 +69,7 @@ function samplePixelColor(colorData, tileSize, x, y) {
 
 function samplePixelBilinear(colorData, tileSize, u, v) {
     v = 1 - v;
+    u = 1 - u;
   // u, v are in [0, 1]
   const px = u * (tileSize - 1);
   const py = v * (tileSize - 1);
